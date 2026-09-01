@@ -35,11 +35,12 @@ object TripOverlay {
         black = View(service)
         black!!.background = circle(Color.BLACK)
 
-        val buttonParams =
+        val paramsButton =
             LinearLayout.LayoutParams(120, 120)
+        paramsButton.bottomMargin = 10
 
-        layout.addView(blue, buttonParams)
-        layout.addView(black, buttonParams)
+        layout.addView(blue, paramsButton)
+        layout.addView(black, paramsButton)
 
         val params = WindowManager.LayoutParams(
             150,
@@ -57,25 +58,31 @@ object TripOverlay {
         try {
             windowManager!!.addView(layout, params)
             root = layout
-            showBlue()
+            showWhite()
         } catch (_: Exception) {
         }
     }
 
+    fun showWhite() {
+        blue?.background = circle(Color.WHITE)
+        black?.background = circle(Color.WHITE)
+    }
+
     fun showBlue() {
-        blue?.alpha = 1.0f
-        black?.alpha = 0.25f
+        blue?.background = circle(Color.rgb(25, 118, 210))
+        black?.background = circle(Color.WHITE)
     }
 
     fun showBlack() {
-        blue?.alpha = 0.25f
-        black?.alpha = 1.0f
+        blue?.background = circle(Color.WHITE)
+        black?.background = circle(Color.BLACK)
     }
 
     private fun circle(color: Int): GradientDrawable {
         return GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(color)
+            setStroke(2, Color.GRAY)
         }
     }
 }
