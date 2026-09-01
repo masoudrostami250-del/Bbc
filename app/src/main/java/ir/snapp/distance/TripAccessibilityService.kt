@@ -11,18 +11,8 @@ class TripAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "BBC_TRIP"
 
-        // مثال:
-        // ۴ دقیقه تا مبدا-۲کیلومتر
-        // ۴ دقیقه تا مبدا-۵کیلومتر
-        // تا مبدا - ۸۰۰ متر
-
-        private val ORIGIN_DISTANCE = Pattern.compile(
-            """تا\s*مبدا\s*[-–—:]?\s*([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|km|ک\.?\s*م|متر|m)""",
-            Pattern.CASE_INSENSITIVE
-        )
-
-        private val ORIGIN_DISTANCE_REVERSE = Pattern.compile(
-            """مبدا\s*[-–—:]?\s*([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|km|ک\.?\s*م|متر|m)""",
+        private val DISTANCE = Pattern.compile(
+            """([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|km|ک\.?\s*م|متر|m)""",
             Pattern.CASE_INSENSITIVE
         )
     }
@@ -33,7 +23,7 @@ class TripAccessibilityService : AccessibilityService() {
         TripOverlay.show(this)
         TripOverlay.showWhite()
 
-        Log.d(TAG, "BBC SERVICE CONNECTED")
+        Log.d(TAG, "SERVICE_CONNECTED")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -41,55 +31,61 @@ class TripAccessibilityService : AccessibilityService() {
 
         val packageName = event.packageName?.toString() ?: ""
 
-        if (!packageName.contains("snapp", ignoreCase = true)) {
+        // متن مستقیم event
+        val eventText = StringBuilder()
+
+        event.text?.forEach {
+            eventText.append(it).append(" ")
+        }
+
+        event.contentDescription?.toString()?.let {
+            eventText.append(it).append(" ")
+        }
+
+        // source خود event
+        try {
+            collect(event.source, eventText)
+        } catch (_: Exception) {
+        }
+
+        // کل صفحه
+        try {
+            collect(rootInActiveWindow, eventText)
+        } catch (_: Exception) {
+        }
+
+        val text = normalize(eventText.toString())
+
+        if (text.isBlank()) return
+
+        // فقط صفحه‌ای که احتمالاً مربوط به اسنپ است
+        if (
+            !packageName.contains("snapp", true) &&
+            !text.contains("مبدا")
+        ) {
             return
         }
 
-        // متن خود Accessibility Event
-        val eventText = buildString {
-            event.text?.forEach {
-                append(it).append(" ")
+        if (text.contains("مبدا")) {
+            Log.d(TAG, "ORIGIN_TEXT=$text")
+
+            val distance = findDistanceNearOrigin(text)
+
+            if (distance != null) {
+                Log.d(TAG, "DISTANCE=$distance")
+
+                if (distance <= 2.0) {
+                    TripOverlay.showBlue()
+                    Log.d(TAG, ">>> BLUE <<<")
+                } else {
+                    TripOverlay.showBlack()
+                    Log.d(TAG, ">>> BLACK <<<")
+                }
             }
-
-            event.contentDescription?.toString()?.let {
-                append(it).append(" ")
-            }
-        }
-
-        // کل درخت رابط کاربری اسنپ
-        val root = rootInActiveWindow
-
-        val treeText = StringBuilder()
-
-        if (root != null) {
-            collectAllText(root, treeText)
-        }
-
-        val completeText = normalize(
-            eventText + " " + treeText.toString()
-        )
-
-        Log.d(TAG, "SNAPP_TEXT=$completeText")
-
-        val distance = findOriginDistance(completeText)
-
-        if (distance == null) {
-            // سفر پیدا نشده؛ رنگ قبلی را تغییر نمی‌دهیم.
-            return
-        }
-
-        Log.d(TAG, "ORIGIN_DISTANCE=$distance")
-
-        if (distance <= 2.0) {
-            TripOverlay.showBlue()
-            Log.d(TAG, "RESULT=BLUE")
-        } else {
-            TripOverlay.showBlack()
-            Log.d(TAG, "RESULT=BLACK")
         }
     }
 
-    private fun collectAllText(
+    private fun collect(
         node: AccessibilityNodeInfo?,
         output: StringBuilder
     ) {
@@ -108,41 +104,33 @@ class TripAccessibilityService : AccessibilityService() {
         }
 
         for (i in 0 until node.childCount) {
-            collectAllText(node.getChild(i), output)
+            try {
+                collect(node.getChild(i), output)
+            } catch (_: Exception) {
+            }
         }
     }
 
-    private fun findOriginDistance(text: String): Double? {
+    private fun findDistanceNearOrigin(text: String): Double? {
 
-        // حالت اصلی: «تا مبدا-۲کیلومتر»
-        val matcher = ORIGIN_DISTANCE.matcher(text)
+        val originIndex = text.indexOf("مبدا")
 
-        if (matcher.find()) {
-            return convertDistance(
-                matcher.group(1),
-                matcher.group(2)
-            )
-        }
+        if (originIndex < 0) return null
 
-        // حالت جایگزین: «مبدا-۲کیلومتر»
-        val reverseMatcher = ORIGIN_DISTANCE_REVERSE.matcher(text)
+        // فقط بخش اطراف «مبدا» بررسی شود
+        val start = maxOf(0, originIndex - 30)
+        val end = minOf(text.length, originIndex + 100)
 
-        if (reverseMatcher.find()) {
-            return convertDistance(
-                reverseMatcher.group(1),
-                reverseMatcher.group(2)
-            )
-        }
+        val area = text.substring(start, end)
 
-        return null
-    }
+        Log.d(TAG, "ORIGIN_AREA=$area")
 
-    private fun convertDistance(
-        value: String?,
-        unit: String?
-    ): Double? {
+        val matcher = DISTANCE.matcher(area)
 
-        if (value == null || unit == null) return null
+        if (!matcher.find()) return null
+
+        val value = matcher.group(1) ?: return null
+        val unit = matcher.group(2) ?: return null
 
         val number = try {
             value.replace(',', '.').toDouble()
@@ -150,14 +138,12 @@ class TripAccessibilityService : AccessibilityService() {
             return null
         }
 
-        val u = unit.lowercase()
-
         return if (
-            u.contains("متر") ||
-            u == "m"
+            unit.contains("متر") ||
+            unit.equals("m", true)
         ) {
             // قانون پروژه:
-            // هر مقدار کمتر از ۱۰۰۰ متر = ۱ کیلومتر
+            // ۵۰۰ متر و ۸۰۰ متر = ۱ کیلومتر
             if (number < 1000.0) {
                 1.0
             } else {
@@ -192,6 +178,8 @@ class TripAccessibilityService : AccessibilityService() {
             .replace('٩', '9')
             .replace('٫', '.')
             .replace('٬', ',')
+            .replace('–', '-')
+            .replace('—', '-')
             .replace('\n', ' ')
             .replace('\r', ' ')
             .replace(Regex("\\s+"), " ")
@@ -199,6 +187,6 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        Log.d(TAG, "BBC SERVICE INTERRUPTED")
+        Log.d(TAG, "SERVICE_INTERRUPTED")
     }
 }
