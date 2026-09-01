@@ -11,13 +11,25 @@ class TripAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "BBC_TRIP"
 
-        private val KM_PATTERN = Pattern.compile(
-            """([0-9۰-۹٠-٩]+(?:[.,٫][0-9۰-۹٠-٩]+)?)\s*کیلومتر""",
+        /*
+         * مثال‌های مورد انتظار:
+         *
+         * ۴ دقیقه تا مبدا-۲کیلومتر
+         * ۵ دقیقه تا مبدا-۵کیلومتر
+         * ۳ دقیقه تا مبدا-۸۰۰متر
+         */
+
+        private val ORIGIN_DISTANCE = Pattern.compile(
+            """مبدا\s*[-–—:]?\s*([0-9۰-۹٠-٩]+(?:[.,٫][0-9۰-۹٠-٩]+)?)\s*(کیلومتر|km|ک\s*م|ک\.م|متر|m)""",
             Pattern.CASE_INSENSITIVE
         )
 
-        private val METER_PATTERN = Pattern.compile(
-            """([0-9۰-۹٠-٩]+(?:[.,٫][0-9۰-۹٠-٩]+)?)\s*متر""",
+        /*
+         * بعضی نسخه‌های Snapp ممکن است ترتیب متن را
+         * به شکل «۲کیلومتر ... مبدا» برگردانند.
+         */
+        private val DISTANCE_BEFORE_ORIGIN = Pattern.compile(
+            """([0-9۰-۹٠-٩]+(?:[.,٫][0-9۰-۹٠-٩]+)?)\s*(کیلومتر|km|ک\s*م|ک\.م|متر|m)\s*.*مبدا""",
             Pattern.CASE_INSENSITIVE
         )
     }
@@ -53,31 +65,93 @@ class TripAccessibilityService : AccessibilityService() {
             text.append(it)
         }
 
-        val root = rootInActiveWindow
-
-        if (root != null) {
-            collectText(root, text)
+        rootInActiveWindow?.let {
+            collectText(it, text)
         }
 
-        val fullText = text.toString()
+        val fullText = normalizeDigits(text.toString())
 
         Log.d(TAG, "SNAPP_TEXT=$fullText")
 
-        val distance = findDistance(fullText)
+        val distance = findOriginDistance(fullText)
 
         if (distance == null) {
             return
         }
 
-        Log.d(TAG, "DISTANCE=$distance")
+        Log.d(TAG, "ORIGIN_DISTANCE=$distance km")
 
         if (distance <= 2.0) {
+            Log.d(TAG, "RESULT=BLUE")
             TripOverlay.showBlue()
-            Log.d(TAG, "COLOR=BLUE")
         } else {
+            Log.d(TAG, "RESULT=BLACK")
             TripOverlay.showBlack()
-            Log.d(TAG, "COLOR=BLACK")
         }
+    }
+
+    private fun findOriginDistance(text: String): Double? {
+
+        /*
+         * حالت اصلی:
+         * «مبدا-5کیلومتر»
+         */
+        val direct = ORIGIN_DISTANCE.matcher(text)
+
+        var found: Double? = null
+
+        while (direct.find()) {
+            val value = parseNumber(direct.group(1))
+            val unit = direct.group(2)
+
+            if (value != null && unit != null) {
+                found = convertToKm(value, unit)
+            }
+        }
+
+        if (found != null) {
+            return found
+        }
+
+        /*
+         * حالت معکوس، در صورت تفاوت ساختار Accessibility.
+         */
+        val reverse = DISTANCE_BEFORE_ORIGIN.matcher(text)
+
+        while (reverse.find()) {
+            val value = parseNumber(reverse.group(1))
+            val unit = reverse.group(2)
+
+            if (value != null && unit != null) {
+                found = convertToKm(value, unit)
+            }
+        }
+
+        return found
+    }
+
+    private fun convertToKm(
+        value: Double,
+        unit: String
+    ): Double {
+
+        val u = unit.lowercase()
+
+        if (u.contains("متر") || u == "m") {
+
+            /*
+             * طبق قانون شما:
+             * 500m -> 1km
+             * 800m -> 1km
+             */
+            return if (value < 1000.0) {
+                1.0
+            } else {
+                value / 1000.0
+            }
+        }
+
+        return value
     }
 
     private fun collectText(
@@ -105,58 +179,6 @@ class TripAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun findDistance(text: String): Double? {
-
-        val normalized = normalizeDigits(text)
-
-        Log.d(TAG, "NORMALIZED=$normalized")
-
-        /*
-         * مثال واقعی Snapp:
-         *
-         * ۴ دقیقه تا مبدا-۲کیلومتر
-         *
-         * فقط قسمت بعد از آخرین خط تیره بررسی می‌شود.
-         */
-
-        val distanceText =
-            normalized.substringAfterLast("-", normalized)
-
-        Log.d(TAG, "DISTANCE_TEXT=$distanceText")
-
-        val kmMatcher = KM_PATTERN.matcher(distanceText)
-
-        if (kmMatcher.find()) {
-
-            val value = parseNumber(kmMatcher.group(1))
-
-            if (value != null) {
-                return value
-            }
-        }
-
-        val meterMatcher = METER_PATTERN.matcher(distanceText)
-
-        if (meterMatcher.find()) {
-
-            val meters = parseNumber(meterMatcher.group(1))
-
-            if (meters != null) {
-
-                // طبق قانون شما:
-                // ۵۰۰ متر و ۸۰۰ متر = ۱ کیلومتر
-
-                return if (meters < 1000.0) {
-                    1.0
-                } else {
-                    meters / 1000.0
-                }
-            }
-        }
-
-        return null
-    }
-
     private fun normalizeDigits(input: String): String {
 
         return input
@@ -181,6 +203,7 @@ class TripAccessibilityService : AccessibilityService() {
             .replace('٨', '8')
             .replace('٩', '9')
             .replace('٫', '.')
+            .replace('٬', ',')
     }
 
     private fun parseNumber(value: String?): Double? {
