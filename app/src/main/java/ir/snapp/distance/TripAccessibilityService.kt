@@ -11,35 +11,70 @@ class TripAccessibilityService : AccessibilityService() {
     companion object {
         private const val TAG = "BBC_TRIP"
 
-        private val KM = Pattern.compile(
-            """([0-9]+(?:[.,][0-9]+)?)\s*(?:کیلومتر|km|ک\.?م)""",
+        // مثال:
+        // ۴ دقیقه تا مبدا-۲کیلومتر
+        // ۴ دقیقه تا مبدا-۵کیلومتر
+        // تا مبدا - ۸۰۰ متر
+
+        private val ORIGIN_DISTANCE = Pattern.compile(
+            """تا\s*مبدا\s*[-–—:]?\s*([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|km|ک\.?\s*م|متر|m)""",
             Pattern.CASE_INSENSITIVE
         )
 
-        private val METER = Pattern.compile(
-            """([0-9]+(?:[.,][0-9]+)?)\s*(?:متر|m)""",
+        private val ORIGIN_DISTANCE_REVERSE = Pattern.compile(
+            """مبدا\s*[-–—:]?\s*([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|km|ک\.?\s*م|متر|m)""",
             Pattern.CASE_INSENSITIVE
         )
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+
         TripOverlay.show(this)
         TripOverlay.showWhite()
-        Log.d(TAG, "CONNECTED")
+
+        Log.d(TAG, "BBC SERVICE CONNECTED")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
-        val pkg = event.packageName?.toString() ?: ""
-        if (!pkg.contains("snapp", true)) return
+        val packageName = event.packageName?.toString() ?: ""
 
-        val root = rootInActiveWindow ?: return
+        if (!packageName.contains("snapp", ignoreCase = true)) {
+            return
+        }
 
-        val distance = findOriginDistance(root)
+        // متن خود Accessibility Event
+        val eventText = buildString {
+            event.text?.forEach {
+                append(it).append(" ")
+            }
+
+            event.contentDescription?.toString()?.let {
+                append(it).append(" ")
+            }
+        }
+
+        // کل درخت رابط کاربری اسنپ
+        val root = rootInActiveWindow
+
+        val treeText = StringBuilder()
+
+        if (root != null) {
+            collectAllText(root, treeText)
+        }
+
+        val completeText = normalize(
+            eventText + " " + treeText.toString()
+        )
+
+        Log.d(TAG, "SNAPP_TEXT=$completeText")
+
+        val distance = findOriginDistance(completeText)
 
         if (distance == null) {
+            // سفر پیدا نشده؛ رنگ قبلی را تغییر نمی‌دهیم.
             return
         }
 
@@ -47,58 +82,90 @@ class TripAccessibilityService : AccessibilityService() {
 
         if (distance <= 2.0) {
             TripOverlay.showBlue()
-            Log.d(TAG, "BLUE")
+            Log.d(TAG, "RESULT=BLUE")
         } else {
             TripOverlay.showBlack()
-            Log.d(TAG, "BLACK")
+            Log.d(TAG, "RESULT=BLACK")
         }
     }
 
-    private fun findOriginDistance(
-        node: AccessibilityNodeInfo?
-    ): Double? {
-        if (node == null) return null
+    private fun collectAllText(
+        node: AccessibilityNodeInfo?,
+        output: StringBuilder
+    ) {
+        if (node == null) return
 
-        val ownText = buildString {
-            node.text?.toString()?.let { append(it).append(" ") }
-            node.contentDescription?.toString()?.let { append(it) }
+        node.text?.toString()?.let {
+            if (it.isNotBlank()) {
+                output.append(it).append(" ")
+            }
         }
 
-        val text = normalize(ownText)
-
-        /*
-         * فقط Node مربوط به «تا مبدا» را بررسی می‌کنیم.
-         * مثال:
-         * ۴ دقیقه تا مبدا-۲کیلومتر
-         * ۴ دقیقه تا مبدا-۵کیلومتر
-         */
-
-        if (text.contains("مبدا")) {
-
-            val km = KM.matcher(text)
-            if (km.find()) {
-                return number(km.group(1))
-            }
-
-            val meter = METER.matcher(text)
-            if (meter.find()) {
-                val meters = number(meter.group(1))
-                if (meters != null) {
-                    return if (meters < 1000.0) {
-                        1.0
-                    } else {
-                        meters / 1000.0
-                    }
-                }
+        node.contentDescription?.toString()?.let {
+            if (it.isNotBlank()) {
+                output.append(it).append(" ")
             }
         }
 
         for (i in 0 until node.childCount) {
-            val result = findOriginDistance(node.getChild(i))
-            if (result != null) return result
+            collectAllText(node.getChild(i), output)
+        }
+    }
+
+    private fun findOriginDistance(text: String): Double? {
+
+        // حالت اصلی: «تا مبدا-۲کیلومتر»
+        val matcher = ORIGIN_DISTANCE.matcher(text)
+
+        if (matcher.find()) {
+            return convertDistance(
+                matcher.group(1),
+                matcher.group(2)
+            )
+        }
+
+        // حالت جایگزین: «مبدا-۲کیلومتر»
+        val reverseMatcher = ORIGIN_DISTANCE_REVERSE.matcher(text)
+
+        if (reverseMatcher.find()) {
+            return convertDistance(
+                reverseMatcher.group(1),
+                reverseMatcher.group(2)
+            )
         }
 
         return null
+    }
+
+    private fun convertDistance(
+        value: String?,
+        unit: String?
+    ): Double? {
+
+        if (value == null || unit == null) return null
+
+        val number = try {
+            value.replace(',', '.').toDouble()
+        } catch (_: Exception) {
+            return null
+        }
+
+        val u = unit.lowercase()
+
+        return if (
+            u.contains("متر") ||
+            u == "m"
+        ) {
+            // قانون پروژه:
+            // هر مقدار کمتر از ۱۰۰۰ متر = ۱ کیلومتر
+            if (number < 1000.0) {
+                1.0
+            } else {
+                number / 1000.0
+            }
+        } else {
+            number
+        }
     }
 
     private fun normalize(value: String): String {
@@ -125,19 +192,13 @@ class TripAccessibilityService : AccessibilityService() {
             .replace('٩', '9')
             .replace('٫', '.')
             .replace('٬', ',')
-    }
-
-    private fun number(value: String?): Double? {
-        if (value == null) return null
-
-        return try {
-            value.replace(',', '.').toDouble()
-        } catch (_: Exception) {
-            null
-        }
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     override fun onInterrupt() {
-        Log.d(TAG, "INTERRUPTED")
+        Log.d(TAG, "BBC SERVICE INTERRUPTED")
     }
 }
