@@ -1,8 +1,6 @@
 package ir.snapp.distance
 
 import android.accessibilityservice.AccessibilityService
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -19,85 +17,91 @@ class TripAccessibilityService : AccessibilityService() {
         )
     }
 
-    private val handler = Handler(Looper.getMainLooper())
-
-    private val scanner = object : Runnable {
-        override fun run() {
-            scanSnapp()
-            handler.postDelayed(this, 250)
-        }
-    }
-
     override fun onServiceConnected() {
         super.onServiceConnected()
-
         TripOverlay.show(this)
         TripOverlay.showWhite()
-
-        handler.removeCallbacks(scanner)
-        handler.post(scanner)
-
-        Log.d(TAG, "SERVICE_CONNECTED")
+        Log.d(TAG, "BBC_CONNECTED")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // اسکن مداوم انجام می‌شود.
-        // اینجا عمداً چیزی را ریست نمی‌کنیم.
+        if (event == null) return
+
+        // 1. متن خود event
+        try {
+            val text = StringBuilder()
+            collect(event.source, text)
+            processText(text.toString())
+        } catch (_: Exception) {
+        }
+
+        // 2. پنجره فعال
+        try {
+            rootInActiveWindow?.let {
+                val text = StringBuilder()
+                collect(it, text)
+                processText(text.toString())
+            }
+        } catch (_: Exception) {
+        }
+
+        // 3. تمام پنجره‌های تعاملی؛ مهم‌ترین بخش این نسخه
+        try {
+            for (window in windows) {
+                val root = window.root ?: continue
+
+                val pkg = root.packageName?.toString() ?: ""
+
+                if (!pkg.contains("snapp", ignoreCase = true)) {
+                    continue
+                }
+
+                val text = StringBuilder()
+                collect(root, text)
+
+                Log.d(
+                    TAG,
+                    "SNAPP_WINDOW pkg=$pkg text=${text.take(500)}"
+                )
+
+                processText(text.toString())
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "WINDOW_ERROR=${e.message}")
+        }
     }
 
-    private fun scanSnapp() {
-        val root = try {
-            rootInActiveWindow
-        } catch (_: Exception) {
-            null
-        }
+    private fun processText(raw: String) {
+        if (raw.isBlank()) return
 
-        if (root == null) return
+        val text = normalize(raw)
 
-        val packageName =
-            root.packageName?.toString() ?: ""
+        if (!text.contains("مبدا")) return
 
-        if (!packageName.contains("snapp", true)) {
-            return
-        }
+        Log.d(TAG, "ORIGIN_TEXT=$text")
 
-        val text = StringBuilder()
+        val distance = findOriginDistance(text) ?: return
 
-        collect(root, text)
-
-        val normalized = normalize(text.toString())
-
-        if (!normalized.contains("مبدا")) {
-            return
-        }
-
-        val distance = findOriginDistance(normalized)
-
-        if (distance == null) {
-            return
-        }
-
-        Log.d(TAG, "ORIGIN=$distance")
+        Log.d(TAG, "FOUND_DISTANCE=$distance")
 
         if (distance <= 2.0) {
             TripOverlay.showBlue(distance)
-            Log.d(TAG, "BLUE $distance")
+            Log.d(TAG, "RESULT=BLUE")
         } else {
             TripOverlay.showBlack(distance)
-            Log.d(TAG, "BLACK $distance")
+            Log.d(TAG, "RESULT=BLACK")
         }
     }
 
     private fun findOriginDistance(text: String): Double? {
+        val originIndex = text.indexOf("مبدا")
 
-        val origin = text.indexOf("مبدا")
+        if (originIndex < 0) return null
 
-        if (origin < 0) return null
+        val start = maxOf(0, originIndex - 30)
+        val end = minOf(text.length, originIndex + 120)
 
-        // فاصله‌ای که بلافاصله در محدوده متن مبدا آمده
-        val end = minOf(text.length, origin + 120)
-
-        val area = text.substring(origin, end)
+        val area = text.substring(start, end)
 
         Log.d(TAG, "ORIGIN_AREA=$area")
 
@@ -116,13 +120,11 @@ class TripAccessibilityService : AccessibilityService() {
 
         return if (
             unit.contains("متر") ||
-            unit.equals("m", true)
+            unit.equals("m", ignoreCase = true)
         ) {
-            if (number < 1000.0) {
-                1.0
-            } else {
-                number / 1000.0
-            }
+            // هر فاصله کمتر از 1 کیلومتر = 1 کیلومتر
+            if (number < 1000) 1.0
+            else number / 1000.0
         } else {
             number
         }
@@ -187,7 +189,6 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        handler.removeCallbacks(scanner)
-        Log.d(TAG, "SERVICE_INTERRUPTED")
+        Log.d(TAG, "BBC_INTERRUPTED")
     }
 }
