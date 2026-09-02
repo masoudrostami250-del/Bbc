@@ -1,11 +1,13 @@
 package ir.snapp.distance
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlin.math.abs
 import java.util.regex.Pattern
 
 class TripAccessibilityService : AccessibilityService() {
@@ -14,21 +16,19 @@ class TripAccessibilityService : AccessibilityService() {
         private const val TAG = "BBC_TRIP"
 
         private val DISTANCE = Pattern.compile(
-            """([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|km|ک\.?\s*م|متر|m)""",
-            Pattern.CASE_INSENSITIVE
+            """([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|متر)"""
         )
     }
 
     private val handler = Handler(Looper.getMainLooper())
 
-    private var lastTripText = ""
-    private var lastDistance: Double? = null
+    private var lastTripSignature = ""
     private var hasTrip = false
 
     private val scanner = object : Runnable {
         override fun run() {
             scanCurrentTrip()
-            handler.postDelayed(this, 500)
+            handler.postDelayed(this, 350)
         }
     }
 
@@ -38,8 +38,7 @@ class TripAccessibilityService : AccessibilityService() {
         TripOverlay.show(this)
         TripOverlay.showWhite()
 
-        lastTripText = ""
-        lastDistance = null
+        lastTripSignature = ""
         hasTrip = false
 
         handler.post(scanner)
@@ -48,160 +47,103 @@ class TripAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
-
-        /*
-         * هر تغییر واقعی در Snapp باعث بررسی مجدد می‌شود.
-         * نتیجه سفر قبلی نگه داشته نمی‌شود.
-         */
         handler.removeCallbacks(scanner)
         handler.post(scanner)
     }
 
+    private data class Candidate(
+        val text: String,
+        val distance: Double,
+        val area: Int,
+        val top: Int,
+        val left: Int
+    )
+
     private fun scanCurrentTrip() {
 
-        var bestText: String? = null
+        val candidates = ArrayList<Candidate>()
 
         try {
-            /*
-             * اول source خود Event/پنجره فعال بررسی می‌شود.
-             * این کمک می‌کند سفر جدید جای سفر قبلی را بگیرد.
-             */
-            rootInActiveWindow?.let { root ->
-                val text = findTripCard(root)
+            for (window in windows) {
+                val root = window.root ?: continue
 
-                if (text != null) {
-                    bestText = text
-                }
+                val pkg = root.packageName?.toString() ?: ""
+                if (!pkg.contains("snapp", true)) continue
+
+                collectCandidates(root, candidates)
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.d(TAG, "WINDOW_ERROR=${e.message}")
         }
 
-        /*
-         * اگر پنجره فعال جواب نداد، پنجره‌های Snapp بررسی می‌شوند.
-         */
-        if (bestText == null) {
-            try {
-                for (window in windows) {
-
-                    val root = window.root ?: continue
-
-                    val pkg = root.packageName?.toString() ?: ""
-
-                    if (!pkg.contains("snapp", true)) {
-                        continue
-                    }
-
-                    val text = findTripCard(root)
-
-                    if (text != null) {
-                        bestText = text
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "WINDOW_ERROR=${e.message}")
-            }
-        }
-
-        /*
-         * اگر سفر فعلی پیدا نشد، نتیجه سفر قبلی نباید باقی بماند.
-         */
-        if (bestText == null) {
-
+        if (candidates.isEmpty()) {
             if (hasTrip) {
                 Log.d(TAG, "TRIP_CLEARED")
             }
 
             hasTrip = false
-            lastTripText = ""
-            lastDistance = null
-
+            lastTripSignature = ""
             TripOverlay.showWhite()
             return
         }
 
-        val currentText = normalize(bestText!!)
+        // فقط کاندیدهای قابل مشاهده
+        val unique = candidates
+            .distinctBy { "${it.text}|${it.distance}|${it.top}|${it.left}" }
+            .sortedWith(
+                compareByDescending<Candidate> { it.area }
+                    .thenBy { it.top }
+                    .thenBy { it.left }
+            )
 
         /*
-         * اگر همان کارت قبلی است، دوباره نتیجه‌سازی نکن.
+         * اولویت:
+         * 1) کارت قابل مشاهده
+         * 2) کارتی که متن "تا مبدا" و فاصله را با هم دارد
+         * 3) بزرگ‌ترین ناحیه کارت
+         *
+         * این قسمت جلوی انتخاب تصادفی candidates.last() را می‌گیرد.
          */
-        if (currentText == lastTripText && hasTrip) {
+        val selected = unique.first()
+
+        val signature = "${selected.text}|${selected.distance}"
+
+        if (signature == lastTripSignature && hasTrip) {
             return
         }
 
-        /*
-         * سفر جدید یا کارت تغییر کرده.
-         */
-        lastTripText = currentText
+        lastTripSignature = signature
         hasTrip = true
 
-        Log.d(TAG, "NEW_TRIP=$currentText")
-
-        val distance = findDistance(currentText)
-
-        if (distance == null) {
-
-            lastDistance = null
-
-            Log.d(TAG, "NO_DISTANCE")
-
-            TripOverlay.showWhite()
-            return
-        }
-
-        lastDistance = distance
-
-        Log.d(TAG, "NEW_TRIP_DISTANCE=$distance")
-
-        if (distance <= 2.0) {
-
-            TripOverlay.showBlue(distance)
-
-            Log.d(TAG, "NEW_TRIP_RESULT=BLUE")
-
-        } else {
-
-            TripOverlay.showBlack(distance)
-
-            Log.d(TAG, "NEW_TRIP_RESULT=BLACK")
-        }
-    }
-
-    /*
-     * کارت سفر را از بین Nodeها پیدا می‌کند.
-     * دیگر کل درخت را یکجا به‌عنوان یک سفر در نظر نمی‌گیریم.
-     */
-    private fun findTripCard(
-        root: AccessibilityNodeInfo
-    ): String? {
-
-        val candidates = ArrayList<String>()
-
-        collectTripCandidates(root, candidates)
-
-        if (candidates.isEmpty()) {
-            return null
-        }
+        Log.d(TAG, "SELECTED_TRIP=${selected.text}")
+        Log.d(TAG, "SELECTED_DISTANCE=${selected.distance}")
 
         /*
-         * آخرین کاندیدای معتبر معمولاً کارت فعلی‌ای است
-         * که Snapp در UI ساخته/به‌روزرسانی کرده.
+         * قانون نهایی:
+         * <= 2 کیلومتر  آبی
+         * > 2 کیلومتر   مشکی
          */
-        return candidates.last()
+        if (selected.distance <= 2.0) {
+            TripOverlay.showBlue(selected.distance)
+            Log.d(TAG, "RESULT=BLUE")
+        } else {
+            TripOverlay.showBlack(selected.distance)
+            Log.d(TAG, "RESULT=BLACK")
+        }
     }
 
-    private fun collectTripCandidates(
+    private fun collectCandidates(
         node: AccessibilityNodeInfo?,
-        candidates: MutableList<String>
+        out: MutableList<Candidate>
     ) {
-
         if (node == null) return
 
         try {
+            if (!node.isVisibleToUser) {
+                return
+            }
 
-            val ownText = buildString {
-
+            val own = buildString {
                 node.text?.toString()?.let {
                     if (it.isNotBlank()) append(it).append(" ")
                 }
@@ -211,82 +153,111 @@ class TripAccessibilityService : AccessibilityService() {
                 }
             }
 
-            val normalizedOwn = normalize(ownText)
+            val normalized = normalize(own)
 
-            /*
-             * مهم:
-             * فقط Nodeهایی که خودشان مربوط به «تا مبدا» هستند
-             * کاندیدای سفر می‌شوند.
-             */
-            if (normalizedOwn.contains("تا مبدا")) {
-
-                val distance = findDistance(normalizedOwn)
+            if (normalized.contains("تا مبدا")) {
+                val distance = findOriginDistance(normalized)
 
                 if (distance != null) {
-                    candidates.add(normalizedOwn)
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+
+                    val width = maxOf(1, rect.width())
+                    val height = maxOf(1, rect.height())
+                    val area = width * height
+
+                    out.add(
+                        Candidate(
+                            text = normalized,
+                            distance = distance,
+                            area = area,
+                            top = rect.top,
+                            left = rect.left
+                        )
+                    )
 
                     Log.d(
                         TAG,
-                        "TRIP_CANDIDATE=$normalizedOwn"
+                        "CANDIDATE=$normalized DIST=$distance AREA=$area"
                     )
                 }
             }
 
             for (i in 0 until node.childCount) {
-                collectTripCandidates(
-                    node.getChild(i),
-                    candidates
-                )
+                collectCandidates(node.getChild(i), out)
             }
 
         } catch (_: Exception) {
         }
     }
 
-    private fun findDistance(text: String): Double? {
+    private fun findOriginDistance(text: String): Double? {
 
         val originIndex = text.indexOf("تا مبدا")
-
         if (originIndex < 0) return null
 
         /*
-         * فقط محدوده نزدیک «تا مبدا» را بررسی می‌کنیم
-         * تا فاصله سفر دیگری وارد محاسبه نشود.
+         * فقط اطراف عبارت «تا مبدا» بررسی می‌شود.
+         * بنابراین فاصله مقصد یا اطلاعات قدیمی وارد محاسبه نمی‌شود.
          */
-        val start = maxOf(0, originIndex - 20)
-        val end = minOf(text.length, originIndex + 100)
+        val start = maxOf(0, originIndex - 35)
+        val end = minOf(text.length, originIndex + 80)
 
         val area = text.substring(start, end)
 
+        Log.d(TAG, "ORIGIN_AREA=$area")
+
         val matcher = DISTANCE.matcher(area)
 
-        if (!matcher.find()) return null
+        var bestDistance: Double? = null
+        var bestDistanceFromOrigin = Int.MAX_VALUE
 
-        val value = matcher.group(1) ?: return null
-        val unit = matcher.group(2) ?: return null
+        while (matcher.find()) {
 
-        val number = try {
-            value.replace(',', '.').toDouble()
-        } catch (_: Exception) {
-            return null
-        }
+            val raw = matcher.group(1) ?: continue
+            val unit = matcher.group(2) ?: continue
 
-        return if (
-            unit.contains("متر") ||
-            unit.equals("m", true)
-        ) {
-            if (number < 1000.0) {
-                1.0
-            } else {
-                number / 1000.0
+            val value = try {
+                raw.replace(',', '.').toDouble()
+            } catch (_: Exception) {
+                continue
             }
-        } else {
-            number
+
+            val distance = if (unit == "متر") {
+                /*
+                 * هر فاصله کمتر از ۱ کیلومتر = ۱ کیلومتر
+                 */
+                if (value < 1000.0) {
+                    1.0
+                } else {
+                    value / 1000.0
+                }
+            } else {
+                value
+            }
+
+            val position = start + matcher.start()
+
+            val distanceFromOrigin =
+                abs(position - originIndex)
+
+            if (distanceFromOrigin < bestDistanceFromOrigin) {
+                bestDistanceFromOrigin = distanceFromOrigin
+                bestDistance = distance
+
+                Log.d(
+                    TAG,
+                    "ORIGIN_DISTANCE=$value $unit => $distance"
+                )
+            }
         }
+
+        Log.d(TAG, "FINAL_DISTANCE=$bestDistance")
+
+        return bestDistance
     }
 
     private fun normalize(value: String): String {
-
         return value
             .replace('۰', '0')
             .replace('۱', '1')
@@ -298,7 +269,6 @@ class TripAccessibilityService : AccessibilityService() {
             .replace('۷', '7')
             .replace('۸', '8')
             .replace('۹', '9')
-
             .replace('٠', '0')
             .replace('١', '1')
             .replace('٢', '2')
@@ -309,24 +279,15 @@ class TripAccessibilityService : AccessibilityService() {
             .replace('٧', '7')
             .replace('٨', '8')
             .replace('٩', '9')
-
             .replace('٫', '.')
             .replace('٬', ',')
-
             .replace('\u200c', ' ')
             .replace('\u200e', ' ')
             .replace('\u200f', ' ')
-
-            .replace('أ', 'ا')
-            .replace('إ', 'ا')
-            .replace('آ', 'ا')
-
             .replace('–', '-')
             .replace('—', '-')
-
             .replace('\n', ' ')
             .replace('\r', ' ')
-
             .replace(Regex("\\s+"), " ")
             .trim()
     }
