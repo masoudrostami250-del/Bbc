@@ -12,24 +12,25 @@ class TripAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "BBC_TRIP"
-        private const val SNAPP_PACKAGE = "snapp"
+        private const val SNAPP = "snapp"
 
         private val DISTANCE = Pattern.compile(
-            """([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|متر)"""
+            """([0-9]+(?:[.,][0-9]+)?)\s*(کیلومتر|متر|km|m)""",
+            Pattern.CASE_INSENSITIVE
         )
     }
 
     private val handler = Handler(Looper.getMainLooper())
 
-    private var snappActive = false
-    private var lastSignature = ""
+    private var snappForeground = false
+    private var lastTripText = ""
 
     private val scanner = object : Runnable {
         override fun run() {
-            if (snappActive) {
+            if (snappForeground) {
                 scanSnapp()
             }
-            handler.postDelayed(this, 500)
+            handler.postDelayed(this, 400)
         }
     }
 
@@ -39,8 +40,8 @@ class TripAccessibilityService : AccessibilityService() {
         TripOverlay.show(this)
         TripOverlay.showWhite()
 
-        snappActive = false
-        lastSignature = ""
+        snappForeground = false
+        lastTripText = ""
 
         handler.post(scanner)
 
@@ -50,175 +51,252 @@ class TripAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
-        val pkg = event.packageName?.toString() ?: ""
+        val pkg = event.packageName?.toString()?.lowercase() ?: ""
 
-        if (!pkg.contains(SNAPP_PACKAGE, ignoreCase = true)) {
-            if (snappActive) {
-                snappActive = false
-                lastSignature = ""
+        /*
+         * فقط تغییر پنجره مشخص می‌کند که برنامه جلویی عوض شده.
+         * تغییرات محتوایی برنامه‌های دیگر نباید وضعیت Snapp را خراب کنند.
+         */
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        ) {
+            if (pkg.contains(SNAPP)) {
+                if (!snappForeground) {
+                    Log.d(TAG, "SNAPP_FOREGROUND")
+                }
+                snappForeground = true
+            } else {
+                if (snappForeground) {
+                    Log.d(TAG, "SNAPP_LEFT")
+                }
+
+                snappForeground = false
+                lastTripText = ""
                 TripOverlay.showWhite()
-                Log.d(TAG, "LEFT_SNAPP -> WHITE")
             }
-            return
         }
 
-        if (!snappActive) {
-            Log.d(TAG, "ENTERED_SNAPP")
+        if (pkg.contains(SNAPP)) {
+            snappForeground = true
+            handler.removeCallbacks(scanner)
+            handler.post(scanner)
         }
-
-        snappActive = true
-
-        // بلافاصله بعد از رویداد اسنپ اسکن کن
-        handler.removeCallbacks(scanner)
-        scanSnapp()
-        handler.postDelayed(scanner, 500)
     }
 
     private fun scanSnapp() {
 
-        if (!snappActive) {
-            TripOverlay.showWhite()
-            return
-        }
-
-        var best: ParsedTrip? = null
+        var selected: String? = null
 
         try {
-            val root = rootInActiveWindow
+            /*
+             * فقط پنجره‌های Snapp.
+             * پنجره فعال اولویت مطلق دارد.
+             */
+            val active = windows
+                .filter {
+                    val root = it.root
+                    root != null &&
+                    root.packageName?.toString()?.contains(SNAPP, true) == true
+                }
+                .sortedByDescending { it.isActive }
 
-            if (root != null) {
-                best = findTrip(root)
+            for (window in active) {
+                val root = window.root ?: continue
+
+                val candidate = findBestTripNode(root)
+
+                if (candidate != null) {
+                    selected = candidate
+                    break
+                }
             }
+
         } catch (e: Exception) {
             Log.d(TAG, "SCAN_ERROR=${e.message}")
         }
 
-        if (best == null) {
-            // اینجا سفید نمی‌کنیم!
-            // ممکن است tree موقتاً خالی باشد.
+        /*
+         * هیچ کارت معتبر فعلی پیدا نشده.
+         * نتیجه قبلی پاک می‌شود تا سفر قبلی روی سفر جدید نماند.
+         */
+        if (selected == null) {
+            if (lastTripText.isNotEmpty()) {
+                Log.d(TAG, "TRIP_CLEARED")
+            }
+
+            lastTripText = ""
+            TripOverlay.showWhite()
             return
         }
 
-        val signature = "${best.text}|${best.distance}"
+        val tripText = normalize(selected)
 
-        if (signature == lastSignature) {
+        if (tripText == lastTripText) {
             return
         }
 
-        lastSignature = signature
+        lastTripText = tripText
 
-        Log.d(TAG, "TRIP=${best.text}")
-        Log.d(TAG, "DISTANCE=${best.distance}")
+        Log.d(TAG, "NEW_TRIP=$tripText")
 
-        if (best.distance <= 2.0) {
-            TripOverlay.showBlue(best.distance)
+        val distance = findOriginDistance(tripText)
+
+        if (distance == null) {
+            Log.d(TAG, "NO_ORIGIN_DISTANCE")
+            TripOverlay.showWhite()
+            return
+        }
+
+        Log.d(TAG, "ORIGIN_DISTANCE=$distance")
+
+        /*
+         * قانون نهایی:
+         * <= 2 km = BLUE
+         * > 2 km = BLACK
+         */
+        if (distance <= 2.0) {
+            TripOverlay.showBlue(distance)
             Log.d(TAG, "RESULT=BLUE")
         } else {
-            TripOverlay.showBlack(best.distance)
+            TripOverlay.showBlack(distance)
             Log.d(TAG, "RESULT=BLACK")
         }
     }
 
-    private data class ParsedTrip(
-        val text: String,
-        val distance: Double
-    )
+    /*
+     * از بین Nodeها فقط Nodeهایی بررسی می‌شوند که:
+     *
+     * 1. قابل مشاهده‌اند
+     * 2. خودشان «تا مبدا» دارند
+     * 3. فاصله بعد از «تا مبدا» دارند
+     *
+     * به جای candidates.last()، کوتاه‌ترین Node معتبر انتخاب می‌شود.
+     * این معمولاً همان Label واقعی فاصله مبدأ است، نه Container بزرگ کارت.
+     */
+    private fun findBestTripNode(
+        root: AccessibilityNodeInfo
+    ): String? {
 
-    private fun findTrip(root: AccessibilityNodeInfo): ParsedTrip? {
+        val candidates = ArrayList<String>()
 
-        val candidates = ArrayList<ParsedTrip>()
-
-        collect(root, candidates)
+        collectCandidates(root, candidates)
 
         if (candidates.isEmpty()) {
             return null
         }
 
-        // نزدیک‌ترین نتیجه به ابتدای درخت را به عنوان کارت فعلی می‌گیریم
-        return candidates.first()
+        return candidates
+            .distinct()
+            .minByOrNull { it.length }
     }
 
-    private fun collect(
+    private fun collectCandidates(
         node: AccessibilityNodeInfo?,
-        output: MutableList<ParsedTrip>
+        candidates: MutableList<String>
     ) {
         if (node == null) return
 
         try {
 
-            val text = buildString {
-                node.text?.toString()?.let {
-                    if (it.isNotBlank()) append(it).append(" ")
+            if (node.isVisibleToUser) {
+
+                val ownText = buildString {
+                    node.text?.toString()?.let {
+                        if (it.isNotBlank()) {
+                            append(it).append(" ")
+                        }
+                    }
+
+                    node.contentDescription?.toString()?.let {
+                        if (it.isNotBlank()) {
+                            append(it)
+                        }
+                    }
                 }
 
-                node.contentDescription?.toString()?.let {
-                    if (it.isNotBlank()) append(it).append(" ")
-                }
-            }
+                val text = normalize(ownText)
 
-            val normalized = normalize(text)
+                if (text.contains("تا مبدا")) {
 
-            if (normalized.contains("تا مبدا")) {
+                    val distance = findOriginDistance(text)
 
-                val originDistance = findOriginDistance(normalized)
+                    if (distance != null) {
+                        candidates.add(text)
 
-                if (originDistance != null) {
-                    output.add(
-                        ParsedTrip(
-                            text = normalized,
-                            distance = originDistance
+                        Log.d(
+                            TAG,
+                            "VALID_ORIGIN=$text DIST=$distance"
                         )
-                    )
-
-                    Log.d(
-                        TAG,
-                        "CANDIDATE=$normalized DIST=$originDistance"
-                    )
+                    }
                 }
             }
 
             for (i in 0 until node.childCount) {
-                collect(node.getChild(i), output)
+                collectCandidates(node.getChild(i), candidates)
             }
 
         } catch (_: Exception) {
         }
     }
 
+    /*
+     * بسیار مهم:
+     * جستجو فقط AFTER «تا مبدا» انجام می‌شود.
+     *
+     * بنابراین عددی که قبل از «تا مبدا» یا مربوط به بخش دیگری
+     * از کارت باشد دیگر نمی‌تواند فاصله مبدأ محسوب شود.
+     */
     private fun findOriginDistance(text: String): Double? {
 
-        val index = text.indexOf("تا مبدا")
+        val originIndex = text.indexOf("تا مبدا")
 
-        if (index < 0) return null
+        if (originIndex < 0) {
+            return null
+        }
 
-        // فقط بعد از «تا مبدا»
-        val after = text.substring(
-            index + "تا مبدا".length
-        )
+        val start = originIndex + "تا مبدا".length
+        val end = minOf(text.length, start + 100)
 
-        val matcher = DISTANCE.matcher(after)
+        if (start >= end) {
+            return null
+        }
+
+        val area = text.substring(start, end)
+
+        val matcher = DISTANCE.matcher(area)
 
         if (!matcher.find()) {
             return null
         }
 
-        val raw = matcher.group(1) ?: return null
+        val value = matcher.group(1) ?: return null
         val unit = matcher.group(2) ?: return null
 
-        val value = try {
-            raw.replace(',', '.').toDouble()
+        val number = try {
+            value.replace(',', '.').toDouble()
         } catch (_: Exception) {
             return null
         }
 
-        return if (unit == "متر") {
-            if (value < 1000.0) 1.0 else value / 1000.0
+        return if (
+            unit.contains("متر", true) ||
+            unit.equals("m", true)
+        ) {
+            /*
+             * هر فاصله کمتر از ۱ کیلومتر = ۱ کیلومتر
+             */
+            if (number < 1000.0) {
+                1.0
+            } else {
+                number / 1000.0
+            }
         } else {
-            value
+            number
         }
     }
 
     private fun normalize(value: String): String {
+
         return value
             .replace('۰', '0')
             .replace('۱', '1')
@@ -230,6 +308,7 @@ class TripAccessibilityService : AccessibilityService() {
             .replace('۷', '7')
             .replace('۸', '8')
             .replace('۹', '9')
+
             .replace('٠', '0')
             .replace('١', '1')
             .replace('٢', '2')
@@ -240,13 +319,21 @@ class TripAccessibilityService : AccessibilityService() {
             .replace('٧', '7')
             .replace('٨', '8')
             .replace('٩', '9')
+
             .replace('٫', '.')
             .replace('٬', ',')
+
             .replace('\u200c', ' ')
             .replace('\u200e', ' ')
             .replace('\u200f', ' ')
+
+            .replace('أ', 'ا')
+            .replace('إ', 'ا')
+            .replace('آ', 'ا')
+
             .replace('\n', ' ')
             .replace('\r', ' ')
+
             .replace(Regex("\\s+"), " ")
             .trim()
     }
