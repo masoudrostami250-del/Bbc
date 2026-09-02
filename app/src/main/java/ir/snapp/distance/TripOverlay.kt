@@ -8,16 +8,18 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
+import android.widget.TextView
 
 object TripOverlay {
 
     private var root: LinearLayout? = null
     private var windowManager: WindowManager? = null
-    private var blue: View? = null
-    private var black: View? = null
+
+    private var status: TextView? = null
+    private var blue: TextView? = null
+    private var black: TextView? = null
 
     fun show(service: AccessibilityService) {
-
         if (root != null) return
 
         windowManager =
@@ -27,24 +29,26 @@ object TripOverlay {
 
         val layout = LinearLayout(service)
         layout.orientation = LinearLayout.VERTICAL
-        layout.setPadding(6, 6, 6, 6)
+        layout.gravity = Gravity.CENTER
+        layout.setPadding(5, 5, 5, 5)
 
-        blue = View(service)
-        blue!!.background = circle(Color.rgb(25, 118, 210))
+        status = button(service, "—")
+        blue = button(service, "—")
+        black = button(service, "—")
 
-        black = View(service)
-        black!!.background = circle(Color.BLACK)
+        val topParams = LinearLayout.LayoutParams(110, 110)
+        topParams.bottomMargin = 12
 
-        val paramsButton =
-            LinearLayout.LayoutParams(120, 120)
-        paramsButton.bottomMargin = 10
+        val bottomParams = LinearLayout.LayoutParams(110, 110)
+        bottomParams.bottomMargin = 12
 
-        layout.addView(blue, paramsButton)
-        layout.addView(black, paramsButton)
+        layout.addView(status, topParams)
+        layout.addView(blue, bottomParams)
+        layout.addView(black, bottomParams)
 
         val params = WindowManager.LayoutParams(
-            150,
-            270,
+            125,
+            380,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
@@ -53,7 +57,7 @@ object TripOverlay {
 
         params.gravity = Gravity.TOP or Gravity.END
         params.x = 15
-        params.y = 350
+        params.y = 300
 
         try {
             windowManager!!.addView(layout, params)
@@ -63,19 +67,71 @@ object TripOverlay {
         }
     }
 
-    fun showWhite() {
-        blue?.background = circle(Color.WHITE)
-        black?.background = circle(Color.WHITE)
+    private fun button(
+        service: AccessibilityService,
+        text: String
+    ): TextView {
+        return TextView(service).apply {
+            this.text = text
+            textSize = 17f
+            setTextColor(Color.DKGRAY)
+            gravity = Gravity.CENTER
+            background = circle(Color.WHITE)
+        }
     }
 
-    fun showBlue() {
+    fun showWhite() {
+        status?.text = "—"
+        blue?.text = "—"
+        black?.text = "—"
+
+        status?.background = circle(Color.WHITE)
+        blue?.background = circle(Color.WHITE)
+        black?.background = circle(Color.WHITE)
+
+        status?.setTextColor(Color.DKGRAY)
+        blue?.setTextColor(Color.DKGRAY)
+        black?.setTextColor(Color.DKGRAY)
+    }
+
+    fun showBlue(distance: Double) {
+        status?.text = "✓"
+
+        blue?.text = formatDistance(distance)
+        black?.text = "—"
+
+        status?.background = circle(Color.WHITE)
         blue?.background = circle(Color.rgb(25, 118, 210))
         black?.background = circle(Color.WHITE)
+
+        status?.setTextColor(Color.DKGRAY)
+        blue?.setTextColor(Color.WHITE)
+        black?.setTextColor(Color.DKGRAY)
     }
 
-    fun showBlack() {
+    fun showBlack(distance: Double) {
+        status?.text = "✓"
+
+        blue?.text = "—"
+        black?.text = formatDistance(distance)
+
+        status?.background = circle(Color.WHITE)
         blue?.background = circle(Color.WHITE)
         black?.background = circle(Color.BLACK)
+
+        status?.setTextColor(Color.DKGRAY)
+        blue?.setTextColor(Color.DKGRAY)
+        black?.setTextColor(Color.WHITE)
+    }
+
+    private fun formatDistance(distance: Double): String {
+        if (distance < 1.0) return "1 km"
+
+        return if (distance == distance.toLong().toDouble()) {
+            "${distance.toLong()} km"
+        } else {
+            String.format("%.1f km", distance)
+        }
     }
 
     private fun circle(color: Int): GradientDrawable {
