@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'apk/**'
   workflow_dispatch:
 
 permissions:
@@ -39,17 +41,27 @@ jobs:
       - name: Build APK
         run: ./gradlew assembleDebug
 
+      - name: Put APK in repository
+        run: |
+          mkdir -p apk
+          cp app/build/outputs/apk/debug/app-debug.apk apk/Bbc.apk
+
+      - name: Commit APK to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add apk/Bbc.apk
+
+          if git diff --cached --quiet; then
+            echo "APK unchanged"
+          else
+            git commit -m "Update Bbc APK"
+            git push
+          fi
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Bbc-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: Bbc Latest APK
-          prerelease: false
-          make_latest: true
-          files: app/build/outputs/apk/debug/app-debug.apk
+          path: apk/Bbc.apk
