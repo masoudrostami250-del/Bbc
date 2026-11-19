@@ -57,10 +57,24 @@ public class GpsTrackingService extends Service implements LocationListener {
             if(whole>0){
                 prefs.edit().putInt("current_odo",current+whole)
                     .putFloat("gps_km_remainder",(float)(pending-whole)).apply();
+                checkServiceAlerts(current+whole);
                 Intent update=new Intent("ir.masoud.oilreminder.GPS_UPDATED");
                 sendBroadcast(update);
             }else prefs.edit().putFloat("gps_km_remainder",(float)pending).apply();
             last=new Location(loc);
+        }
+    }
+    private void checkServiceAlerts(int now){
+        if(!prefs.getBoolean("notifications_enabled",true))return;
+        int lead=prefs.getInt("average_daily_km",225)*3;
+        int oil=prefs.getInt("next_oil",65000),air=prefs.getInt("next_air",81500);
+        if(now>=oil-lead&&prefs.getInt("alerted_oil_due",0)!=oil){
+            MainActivity.notifyNow(this,10,"نزدیک شدن موعد تعویض روغن","به موعد تعویض روغن و فیلتر روغن نزدیک شده‌ای. کیلومتر موعد: "+oil);
+            prefs.edit().putInt("alerted_oil_due",oil).apply();
+        }
+        if(now>=air-lead&&prefs.getInt("alerted_air_due",0)!=air){
+            MainActivity.notifyNow(this,11,"نزدیک شدن موعد فیلتر هوا","به موعد تعویض فیلتر هوا نزدیک شده‌ای. کیلومتر موعد: "+air);
+            prefs.edit().putInt("alerted_air_due",air).apply();
         }
     }
     @Override public int onStartCommand(Intent intent,int flags,int startId){return START_STICKY;}
