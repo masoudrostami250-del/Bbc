@@ -16,6 +16,7 @@ public class MainActivity extends Activity {
     TextView status;
     SharedPreferences p;
     CheckBox notifications;
+    TextView gpsStatus;
     int dp(float x){return (int)(x*getResources().getDisplayMetrics().density+0.5f);}
     TextView text(String s,int size){TextView t=new TextView(this);t.setText(s);t.setTextSize(size);t.setTextColor(0xff202020);t.setPadding(0,dp(7),0,dp(7));return t;}
     Button button(String s){Button b=new Button(this);b.setText(s);return b;}
@@ -45,7 +46,12 @@ public class MainActivity extends Activity {
         root.addView(text("کیلومتر فعلی خودرو را وارد کن:",16));
         odoInput=new EditText(this);odoInput.setSingleLine(true);odoInput.setInputType(2);
         odoInput.setText(String.valueOf(p.getInt("current_odo",59000)));odoInput.setHint("مثلاً ۶۵۰۰۰");root.addView(odoInput);
-        Button update=button("ثبت کیلومتر و بررسی سررسید");root.addView(update);update.setOnClickListener(v->saveOdo());
+        Button update=button("ثبت دستی کیلومتر و بررسی سررسید");root.addView(update);update.setOnClickListener(v->saveOdo());
+        root.addView(text("ثبت خودکار کیلومتر با GPS",20));
+        root.addView(text("برای محاسبه خودکار، GPS را روشن کن و دکمه شروع را بزن. ثبت کیلومتر حتی با خاموش بودن صفحه ادامه پیدا می‌کند؛ اعلان دائمی نشان داده می‌شود.",14));
+        Button gpsStart=button("شروع ثبت خودکار با GPS");root.addView(gpsStart);gpsStart.setOnClickListener(v->startGpsTracking());
+        Button gpsStop=button("توقف ثبت خودکار GPS");root.addView(gpsStop);gpsStop.setOnClickListener(v->stopGpsTracking());
+        gpsStatus=text("",15);root.addView(gpsStatus);updateGpsStatus();
         status=text("",16);root.addView(status);
         root.addView(text("تنظیم اعلان‌ها",20));
         notifications=new CheckBox(this);notifications.setText("روشن بودن اعلان‌های یادآوری");
@@ -80,6 +86,36 @@ public class MainActivity extends Activity {
         setContentView(scroll);refresh();
     }
 
+    @Override protected void onResume(){super.onResume();if(p!=null){refresh();updateGpsStatus();}}
+    void updateGpsStatus(){
+        if(gpsStatus!=null)gpsStatus.setText(p.getBoolean("gps_tracking",false)?"وضعیت GPS: ثبت خودکار روشن است":"وضعیت GPS: خاموش؛ ثبت دستی فعال است");
+    }
+    void startGpsTracking(){
+        if(checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)!=PackageManager.PERMISSION_GRANTED){
+            requestPermissions(new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION,android.Manifest.permission.ACCESS_COARSE_LOCATION},21);
+            return;
+        }
+        if(Build.VERSION.SDK_INT>=29&&!android.location.LocationManager.GPS_PROVIDER.equals("")){
+            android.location.LocationManager lm=(android.location.LocationManager)getSystemService(LOCATION_SERVICE);
+            if(lm==null||!lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)){
+                Toast.makeText(this,"ابتدا موقعیت مکانی و GPS گوشی را روشن کن",Toast.LENGTH_LONG).show();return;
+            }
+        }
+        Intent i=new Intent(this,GpsTrackingService.class);
+        if(Build.VERSION.SDK_INT>=26)startForegroundService(i);else startService(i);
+        p.edit().putBoolean("gps_tracking",true).apply();updateGpsStatus();
+        Toast.makeText(this,"ثبت خودکار کیلومتر با GPS شروع شد",Toast.LENGTH_LONG).show();
+    }
+    void stopGpsTracking(){
+        stopService(new Intent(this,GpsTrackingService.class));
+        p.edit().putBoolean("gps_tracking",false).apply();updateGpsStatus();
+        Toast.makeText(this,"ثبت خودکار متوقف شد؛ ثبت دستی همچنان فعال است",Toast.LENGTH_SHORT).show();
+    }
+    @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] results){
+        super.onRequestPermissionsResult(requestCode,permissions,results);
+        if(requestCode==21&&results.length>0&&results[0]==PackageManager.PERMISSION_GRANTED)startGpsTracking();
+        else if(requestCode==21)Toast.makeText(this,"مجوز موقعیت داده نشد؛ می‌توانی کیلومتر را دستی ثبت کنی",Toast.LENGTH_LONG).show();
+    }
     void requestNotif(){
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"},9);
